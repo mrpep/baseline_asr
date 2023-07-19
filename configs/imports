@@ -1,0 +1,10 @@
+tasks: tasks
+datasets.load_dataset: datasets.load_dataset
+transformers.Wav2Vec2FeatureExtractor: Wav2Vec2FeatureExtractor
+transformers.Wav2Vec2Processor: Wav2Vec2Processor
+transformers.Wav2Vec2CTCTokenizer: Wav2Vec2CTCTokenizer
+transformers.WavLMForCTC: WavLMForCTC
+transformers.Wav2Vec2ForCTC: Wav2Vec2ForCTC
+transformers.TrainingArguments: TrainingArguments
+tasks.models.WavLMRNNT: WavLMRNNT
+tasks.models.CustomTrainer: CustomTrainer

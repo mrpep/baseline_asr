@@ -1,0 +1,24 @@
+tasks.fit_model:
+    training_args = @TrainingArguments
+    data_collator = @tasks.DataCollatorCTCWithPadding
+    metrics_fn = @tasks.compute_metrics
+    
+tasks.DataCollatorCTCWithPadding:
+    padding=True
+
+TrainingArguments:
+    group_by_length=False #Just for debugging
+    per_device_train_batch_size=16
+    per_device_eval_batch_size=4
+    eval_accumulation_steps=16
+    evaluation_strategy="steps"
+    num_train_epochs=30
+    fp16=True
+    gradient_checkpointing=True
+    save_steps=500
+    eval_steps=500
+    logging_steps=500
+    learning_rate=1e-4
+    weight_decay=0.005
+    warmup_steps=1000
+    save_total_limit=2

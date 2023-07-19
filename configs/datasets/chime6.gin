@@ -1,0 +1,24 @@
+METADATA_DIR='/mnt/matylda3/karafiat/GIT/CHiME-7/ASR/espnet.v0/data/lhotse'
+DATASET_CACHE='/mnt/matylda5/qbarchi/finetune_wav2vec'
+TRAIN_SPLIT='chime6-dev'
+BLACKLIST='/mnt/matylda5/qbarchi/chime7/CHiME-7/dataprep/lists/discard_segments'
+
+tasks.load_hf_dataset:
+    dataset_fn=@datasets.load_dataset.load_dataset
+    save_path="/tmp/qpepino/hf_data/timit-hf"
+    postprocessing_fn=[@tasks.preprocess_timit_transcriptions, @tasks.create_char_vocab]
+
+datasets.load_dataset.load_dataset:
+    path="/mnt/matylda5/qbarchi/finetune_wav2vec/huggingface_builders/chime7_lhotse.py"
+    data_dir="/mnt/matylda2/data/TIMIT/timit"
+    keep_in_memory=False
+    cache_dir=%DATASET_CACHE
+    metadata_dir=%METADATA_DIR
+    num_proc=4
+    train_split=%TRAIN_SPLIT
+    blacklist=%BLACKLIST
+
+tasks.process_hf_dataset:
+    processors=[@tasks.prepare_timit]
+
+tasks.create_char_vocab.vocab_path='vocabs/char_chime6.json'

@@ -1,0 +1,1 @@
+/mnt/matylda5/qpepino/pretrained_models/spkrec-xvect-voxceleb/custom.py

@@ -1,0 +1,13 @@
+tasks.load_hf_dataset:
+    dataset_fn=@datasets.load_dataset.load_dataset
+    save_path="/mnt/matylda5/qpepino/hf_data/timit"
+    postprocessing_fn=[@tasks.preprocess_transcriptions, @tasks.create_char_vocab]
+
+datasets.load_dataset.load_dataset:
+    path="timit_asr"
+    data_dir="/mnt/matylda2/data/TIMIT/timit"
+
+tasks.process_hf_dataset:
+    processors=[@tasks.prepare_timit]
+
+tasks.create_char_vocab.vocab_path='vocabs/char_timit.json'

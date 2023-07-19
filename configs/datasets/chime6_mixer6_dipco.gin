@@ -1,0 +1,28 @@
+METADATA_DIR='/mnt/matylda3/karafiat/GIT/CHiME-7/ASR/espnet.v0/data/lhotse'
+DATASET_CACHE='/mnt/matylda5/qpepino/finetune_wav2vec'
+TRAIN_SPLIT=['chime6_train', 'mixer6_train'] #Dipco train missing?
+EVAL_SPLIT=['chime6_dev', 'mixer6_dev', 'dipco_dev']
+BLACKLIST='/mnt/matylda5/qbarchi/chime7/CHiME-7/dataprep/lists/discard_segments'
+
+tasks.load_hf_dataset:
+    dataset_fn=@datasets.load_dataset.load_dataset
+    save_path="/mnt/matylda5/qpepino/hf_data/chime7"
+    postprocessing_fn=[@tasks.preprocess_transcriptions, @tasks.create_char_vocab]
+
+datasets.load_dataset.load_dataset:
+    path="/mnt/matylda5/qpepino/baseline-asr/tasks/chime7_lhotse.py"
+    data_dir="/mnt/matylda2/data/TIMIT/timit"
+    keep_in_memory=False
+    cache_dir=%DATASET_CACHE
+    metadata_dir=%METADATA_DIR
+    num_proc=4
+    train_split=%TRAIN_SPLIT
+    eval_split=%EVAL_SPLIT
+    blacklist=%BLACKLIST
+
+tasks.process_hf_dataset:
+    processors=[@tasks.prepare_timit]
+
+tasks.create_char_vocab.vocab_path='vocabs/char_chime6.json'
+tasks.preprocess_transcriptions.remove_columns=[]
+tasks.fit_model.eval_splits=['chime6_dev', 'mixer6_dev', 'dipco_dev']
