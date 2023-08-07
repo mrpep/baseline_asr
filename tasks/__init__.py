@@ -11,6 +11,11 @@ import numpy as np
 from transformers import AutoProcessor, Trainer
 from tqdm import tqdm
 import joblib
+import pandas as pd
+import itertools
+import soundfile as sf
+import gzip
+import random
 
 def global_setup(state):
     os.environ['HF_DATASETS_OFFLINE']='1'
@@ -41,13 +46,15 @@ def load_hf_dataset(state, dataset_fn, save_path, postprocessing_fn=None):
     state['dataset'] = dataset
     return state
 
-def preprocess_transcriptions(state, dataset, chars_to_ignore_regex='[\,\?\.\!\-\;\:\"]', remove_columns=["phonetic_detail", "word_detail", "dialect_region", "id", "sentence_type", "speaker_id"]):
+def preprocess_transcriptions(state, dataset, chars_to_ignore_regex='[\,\?\.\!\-\;\:\"]', remove_columns=["phonetic_detail", "word_detail", "dialect_region", "id", "sentence_type", "speaker_id"], in_column='text'):
     def remove_special_characters(batch):
-        batch["text"] = re.sub(chars_to_ignore_regex, '', batch["text"]).lower()
+        batch[in_column] = re.sub(chars_to_ignore_regex, '', batch["text"]).lower()
         return batch
-    
-    dataset = dataset.map(remove_special_characters)
-    dataset = dataset.remove_columns(remove_columns)
+    if isinstance(dataset,pd.DataFrame):
+        dataset = dataset.apply(remove_special_characters,axis=1)
+    else:
+        dataset = dataset.map(remove_special_characters)
+        dataset = dataset.remove_columns(remove_columns)
 
     return state, dataset
 
@@ -61,8 +68,13 @@ def create_char_vocab(state, dataset, vocab_path):
     if Path(vocab_path).exists():
         logger.info('Reusing existing vocab: {}'.format(vocab_path))
     else:
-        vocabs = timit.map(extract_all_chars, batched=True, batch_size=-1, keep_in_memory=True, remove_columns=timit.column_names["train"])
-        vocab_list = list(set(vocabs["train"]["vocab"][0]) | set(vocabs["test"]["vocab"][0]))
+        if isinstance(timit,pd.DataFrame):
+            vocabs = timit.apply(extract_all_chars, axis=1)
+            vocabs = [v['vocab'][0] for v in vocabs.values]
+            vocab_list = set(itertools.chain(*vocabs))
+        else:
+            vocabs = timit.map(extract_all_chars, batched=True, batch_size=-1, keep_in_memory=True, remove_columns=timit.column_names["train"])
+            vocab_list = list(set(vocabs["train"]["vocab"][0]) | set(vocabs["test"]["vocab"][0]))
         vocab_dict = {v: k for k, v in enumerate(vocab_list)}
         vocab_dict["|"] = vocab_dict[" "]
         del vocab_dict[" "]
@@ -132,6 +144,7 @@ def fit_model(state, training_args, data_collator=None, metrics_fn=None, eval_sp
     training_args = training_args(output_dir=state['output_dir'])
     if trainer_cls is None:
         trainer_cls = Trainer
+
     trainer = trainer_cls(
         model=state['model'],
         data_collator=data_collator(state['processor']),
@@ -142,10 +155,11 @@ def fit_model(state, training_args, data_collator=None, metrics_fn=None, eval_sp
         tokenizer=state['processor'].feature_extractor #Is this right? Term mismatch with NLP?
     )
     
-    batch = data_collator(state['processor'])([state['dataset']['train'][i] for i in range(16)])
-    batch = {k: v.to('cuda') for k,v in batch.items()}
-    state['model'].to('cuda')
-    outs = state['model'](**batch)
+    #batch = data_collator(state['processor'])([state['dataset']['train'][i] for i in range(16)])
+    #batch = {k: v.to('cuda') for k,v in batch.items()}
+    #state['model'].to('cuda')
+    #outs = state['model'](**batch)
+    #from IPython import embed; embed()
     trainer.train()
 
 class DataCollatorCTCWithPadding:
@@ -166,6 +180,7 @@ class DataCollatorCTCWithPadding:
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
+
         input_features = [{"input_values": feature["input_values"]} for feature in features]
         label_features = [{"input_ids": feature["labels"]} for feature in features]
 
@@ -188,6 +203,8 @@ class DataCollatorCTCWithPadding:
         # replace padding with -100 to ignore loss correctly
         labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
         batch["labels"] = labels
+        if 'spk_emb' in features[0].keys():
+            batch['spk_emb'] = torch.stack([torch.tensor(xi['spk_emb']) for xi in features])
 
         return batch
 
@@ -271,5 +288,119 @@ def eval_model(state, beam_size=1, start=0, end=None, split=None):
     joblib.dump(results, Path(state['output_dir'],'results.pkl'))
     return state
             
+def discard_long_audios(state, dataset):
+    return state, dataset.filter(lambda x: (len(x['audio']['array'])<200000) and (len(x['text']) < 200),num_proc=16)
     
-    
+def load_gzjson(filename):
+    results = []
+    with gzip.open(filename,'r') as f:
+        for x in f.read().splitlines():
+            results.append(json.loads(x))
+    return results
+
+def load_chime7(state,dataset_path, chime_paths, postprocessing_fn, train_splits, eval_splits):
+    if not Path('librimix_metadata.pkl').exists():
+        #Load Augmented Data
+        supervision_list = Path(dataset_path).rglob('*.pkl')
+        all_supervisions = []
+        for s in tqdm(supervision_list, desc='Loading metadata'):
+            all_supervisions.extend(joblib.load(s))
+        all_supervisions = pd.DataFrame(all_supervisions)
+        all_supervisions = all_supervisions.rename(columns={'transcription':'text'})
+        all_supervisions['split'] = 'train'
+        #Load Chime6 data
+        
+        rows = []
+        for split in (train_splits + eval_splits):
+            split_dir=Path(chime_paths,*split.split('_'))
+            recordings_file=Path(split_dir,'{}_gss_recordings.jsonl.gz'.format(split))
+            supervisions_file=Path(split_dir,'{}_gss_supervisions.jsonl.gz'.format(split))
+            recordings_md=load_gzjson(recordings_file)
+            recordings_md = {v['id']: v for v in recordings_md}
+            supervisions_md=load_gzjson(supervisions_file)
+            for s in supervisions_md:
+                example_i = {'text': s['text'],
+                                'speaker_id': s['speaker'],
+                                'filename': Path('/mnt/matylda3/karafiat/GIT/CHiME-7/ASR/espnet.v0',recordings_md[s['recording_id']]['sources'][0]['source']),
+                                'split': 'train' if split in train_splits else split}
+                if 'start' in s:
+                    sr = recordings_md[s['recording_id']]['sampling_rate']
+                    example_i['start'] = int(s['start']*sr)
+                    example_i['stop'] = int((s['start']+s['duration'])*sr)
+                rows.append(example_i)
+
+        chime6_df = pd.DataFrame(rows)
+        all_supervisions=pd.concat([all_supervisions,chime6_df])
+
+        for fn in postprocessing_fn:
+            state, all_supervisions = fn(state, all_supervisions)
+        #Load Chime Mixer DipCO
+        tqdm.pandas()
+        all_supervisions['duration'] = all_supervisions['filename'].progress_apply(lambda x: sf.info(x).frames if Path(x).exists() else -1)
+    else:
+        all_supervisions = joblib.load('librimix_metadata.pkl')
+    all_supervisions = all_supervisions.loc[all_supervisions['duration']<160000]
+    state['dataset_metadata'] = all_supervisions
+    return state
+
+def get_dataloaders(state, dataset_cls, tokenizer_fn, feature_extractor_fn, processor_fn):
+    tokenizer = tokenizer_fn(state['vocab_path'], 
+                                unk_token="[UNK]", 
+                                pad_token="[PAD]", 
+                                word_delimiter_token="|")
+    processor = processor_fn(tokenizer=tokenizer, feature_extractor=feature_extractor_fn())
+    state['processor'] = processor
+    dataset_meta = state['dataset_metadata']
+    dataset = dataset_cls(dataset=state['dataset_metadata'],processor=processor)
+    state['dataset'] = {s: dataset_cls(dataset=dataset_meta.loc[dataset_meta['split']==s], processor=processor) for s in dataset_meta['split'].unique()}
+    return state
+
+class Chime7Dataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, processor, xvectors=None):
+        super().__init__()
+        self.dataset = dataset
+        self.processor = processor
+        self.xvectors = xvectors
+        if self.xvectors is not None:
+            xv_files=list(Path(self.xvectors).rglob('*'))
+            xv = {}
+            for f in xv_files:
+                d = joblib.load(f)
+                if not isinstance(d[next(iter(d.keys()))],dict):
+                    xv.update(d)
+                else:
+                    for _,v in d.items():
+                        xv.update(v)
+            self.xvectors=xv
+
+    def __getitem__(self, idx):
+        si = self.dataset.iloc[idx]
+        if not np.isnan(si['start']):
+            start=int(si['start'])
+        else:
+            start=0
+        if not np.isnan(si['stop']):
+            stop=int(si['stop'])
+        else:
+            stop=None
+        try:
+            x, fs = sf.read(si['filename'],start=start,stop=stop)
+        except:
+            print('Failed')
+        batch = {}
+        if self.processor is not None:
+            batch['input_values'] = self.processor(x, sampling_rate=fs).input_values[0]
+            batch["input_length"] = len(batch["input_values"])
+
+            with self.processor.as_target_processor():
+                batch["labels"] = self.processor(si["text"]).input_ids
+        if self.xvectors is not None:
+            xv = self.xvectors[si['speaker_id']]
+            if isinstance(xv,list):
+                idx = random.randint(0,len(xv)-1)
+                xv = xv[idx]
+            batch['spk_emb'] = xv
+        return batch
+
+    def __len__(self):
+        return len(self.dataset)

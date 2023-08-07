@@ -18,12 +18,20 @@ from tasks.models.rnnt import conformer_rnnt_model, RNNTBeamSearch
 from transformers import Trainer
 from loguru import logger
 from tqdm import tqdm
+import inspect
 
 class WavLMRNNT(WavLMPreTrainedModel):
-    def __init__(self, config, target_lang = None):
+    def __init__(self, config, 
+                        target_lang = None, 
+                        upstream_model_cls=WavLMModel, 
+                        speaker_embedding_dim=None,
+                        speaker_embedding_mode='sum'):
         super().__init__(config)
 
-        self.wavlm = WavLMModel(config)
+        if speaker_embedding_dim is not None:
+            config.speaker_embedding_dim = speaker_embedding_dim
+            config.speaker_embedding_mode = speaker_embedding_mode
+        self.wavlm = upstream_model_cls(config)
         self.dropout = nn.Dropout(config.final_dropout)
 
         self.target_lang = target_lang
@@ -119,6 +127,7 @@ class WavLMRNNT(WavLMPreTrainedModel):
     def forward(
         self,
         input_values,
+        spk_emb = None,
         attention_mask = None,
         output_attentions = None,
         output_hidden_states = None,
@@ -134,12 +143,18 @@ class WavLMRNNT(WavLMPreTrainedModel):
         """
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        kwargs = dict(attention_mask=attention_mask,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict)
+
+        
+        if 'spk_emb' in inspect.signature(self.wavlm.forward).parameters:
+            kwargs['spk_emb'] = spk_emb
+    
         outputs = self.wavlm(
             input_values,
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            **kwargs
         )
 
         hidden_states = outputs[0]
@@ -182,9 +197,11 @@ class CustomTrainer(Trainer):
         rnnt_decoder = RNNTBeamSearch(self.model.lm_head, blank_token)
         for x in tqdm(eval_dataset):
             with torch.no_grad():
-                outputs = base_model(
-                    torch.tensor(x['input_values'], device=base_model.device, dtype=base_model.dtype).unsqueeze(0)
-            )
+                model_args = [torch.tensor(x['input_values'], device=base_model.device, dtype=base_model.dtype).unsqueeze(0)]
+                model_kwargs = {}
+                if 'spk_emb' in x:
+                    model_kwargs['spk_emb'] = torch.tensor(x['spk_emb'], device=base_model.device, dtype=base_model.dtype).unsqueeze(0)
+                outputs = base_model(*model_args, **model_kwargs)
                 outputs = outputs['last_hidden_state']
                 hyp = rnnt_decoder(outputs, torch.tensor([outputs.shape[1]], device=outputs.device), 1)
                 result = hyp[0][0]

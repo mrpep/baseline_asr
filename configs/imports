@@ -8,3 +8,4 @@ transformers.Wav2Vec2ForCTC: Wav2Vec2ForCTC
 transformers.TrainingArguments: TrainingArguments
 tasks.models.WavLMRNNT: WavLMRNNT
 tasks.models.CustomTrainer: CustomTrainer
+tasks.models.wavlm.WavLMModelConditionedByXVector: WavLMModelConditionedByXVector

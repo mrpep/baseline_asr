@@ -5,6 +5,11 @@ tasks.load_hf_processor:
     tokenizer=@Wav2Vec2CTCTokenizer
     feature_extractor=@Wav2Vec2FeatureExtractor
 
+task.get_dataloaders:
+    processor_fn=@Wav2Vec2Processor
+    tokenizer_fn=@Wav2Vec2CTCTokenizer
+    feature_extractor_fn=@Wav2Vec2FeatureExtractor   
+
 Wav2Vec2FeatureExtractor:
     feature_size=1
     sampling_rate=16000

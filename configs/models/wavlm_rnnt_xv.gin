@@ -5,11 +5,6 @@ tasks.load_hf_processor:
     tokenizer=@Wav2Vec2CTCTokenizer
     feature_extractor=@Wav2Vec2FeatureExtractor
 
-tasks.get_dataloaders:
-    processor_fn=@Wav2Vec2Processor
-    tokenizer_fn=@Wav2Vec2CTCTokenizer
-    feature_extractor_fn=@Wav2Vec2FeatureExtractor
-    
 Wav2Vec2FeatureExtractor:
     feature_size=1
     sampling_rate=16000
@@ -17,6 +12,11 @@ Wav2Vec2FeatureExtractor:
     do_normalize=True
     return_attention_mask=False
 
+tasks.get_dataloaders:
+    processor_fn=@Wav2Vec2Processor
+    tokenizer_fn=@Wav2Vec2CTCTokenizer
+    feature_extractor_fn=@Wav2Vec2FeatureExtractor
+    
 tasks.load_hf_model:
     model_cls=@WavLMRNNT
     from_pretrained_args=@model_kwargs/tasks.make_dict()
@@ -27,3 +27,6 @@ model_kwargs/tasks.make_dict:
     ignore_mismatched_sizes=True
 
 tasks.fit_model.trainer_cls = @CustomTrainer
+
+WavLMRNNT:
+    upstream_model_cls=@WavLMModelConditionedByXVector

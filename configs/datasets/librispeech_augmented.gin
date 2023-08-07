@@ -1,0 +1,10 @@
+tasks.load_chime7:
+    dataset_path='/mnt/matylda5/qpepino/librispeech_augment'
+    chime_paths='/mnt/matylda3/karafiat/GIT/CHiME-7/ASR/espnet.v0/data/lhotse/gss'
+    postprocessing_fn=[@tasks.preprocess_transcriptions, @tasks.create_char_vocab]
+    train_splits=['chime6_train', 'mixer6_train']
+    eval_splits=['chime6_dev', 'mixer6_dev', 'dipco_dev']
+tasks.create_char_vocab.vocab_path='vocabs/char_librispeechaug.json'
+tasks.preprocess_transcriptions.remove_columns=[]
+tasks.fit_model.eval_splits=['chime6_dev', 'mixer6_dev']
+tasks.get_dataloaders.dataset_cls=@tasks.Chime7Dataset
