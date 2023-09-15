@@ -1,8 +1,6 @@
 from transformers import WavLMPreTrainedModel, WavLMModel
 from torchaudio.functional import rnnt_loss
 from torchaudio.models.rnnt import _Predictor, _Joiner, RNNT
-import torch
-import torch.nn as nn
 import warnings
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -19,18 +17,35 @@ from transformers import Trainer
 from loguru import logger
 from tqdm import tqdm
 import inspect
+import torch.nn as nn
+import torch
+import transformers
 
 class WavLMRNNT(WavLMPreTrainedModel):
     def __init__(self, config, 
                         target_lang = None, 
                         upstream_model_cls=WavLMModel, 
                         speaker_embedding_dim=None,
-                        speaker_embedding_mode='sum'):
+                        speaker_embedding_mode='sum',
+                        xch_layers=None,
+                        pool_layer=None,
+                        num_conformer_layers=1):
         super().__init__(config)
 
         if speaker_embedding_dim is not None:
             config.speaker_embedding_dim = speaker_embedding_dim
             config.speaker_embedding_mode = speaker_embedding_mode
+        if xch_layers is not None:
+            config.xch_layers = xch_layers
+        else:
+            config.xch_layers = []
+        if pool_layer is not None:
+            config.pool_layer = pool_layer
+        else:
+            config.pool_layer = None
+        config.num_conformer_layers=num_conformer_layers
+        if 'Multichannel' in upstream_model_cls.__name__:
+            config.layerdrop=0
         self.wavlm = upstream_model_cls(config)
         self.dropout = nn.Dropout(config.final_dropout)
 
@@ -60,7 +75,7 @@ class WavLMRNNT(WavLMPreTrainedModel):
             time_reduction_stride=4,
             conformer_input_dim=256,
             conformer_ffn_dim=1024,
-            conformer_num_layers=1,
+            conformer_num_layers=config.num_conformer_layers,
             conformer_num_heads=4,
             conformer_depthwise_conv_kernel_size=31,
             conformer_dropout=0.1,
@@ -133,6 +148,7 @@ class WavLMRNNT(WavLMPreTrainedModel):
         output_hidden_states = None,
         return_dict = None,
         labels = None,
+        num_channels=None
     ):
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, target_length)`, *optional*):
@@ -151,7 +167,8 @@ class WavLMRNNT(WavLMPreTrainedModel):
         
         if 'spk_emb' in inspect.signature(self.wavlm.forward).parameters:
             kwargs['spk_emb'] = spk_emb
-    
+        if 'ch_lens' in inspect.signature(self.wavlm.forward).parameters:
+            kwargs['ch_lens'] = num_channels
         outputs = self.wavlm(
             input_values,
             **kwargs
@@ -162,6 +179,10 @@ class WavLMRNNT(WavLMPreTrainedModel):
 
         attention_mask = (attention_mask if attention_mask is not None else torch.ones_like(input_values, dtype=torch.long))
         input_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1)).to(torch.long)
+        if num_channels is not None:
+            idxs = torch.cumsum(torch.cat([torch.tensor([0],device=num_channels.device),num_channels[:-1]]), 0)
+            attention_mask = attention_mask[idxs]
+            input_lengths = input_lengths[idxs]
         labels_len = (labels!=-100).sum(axis=1)
         labels[labels==-100] = 0
         logits, source_lengths, target_lengths, predictor_state = self.lm_head(hidden_states, input_lengths, torch.cat([torch.ones((labels.shape[0],1), device=labels.device, dtype=labels.dtype)*self.config.vocab_size,labels],axis=1), labels_len+1)
@@ -183,6 +204,11 @@ class WavLMRNNT(WavLMPreTrainedModel):
         )
 
 class CustomTrainer(Trainer):
+    def __init__(self, lr_scheduler=None, num_warmup_steps=0, **kwargs):
+        super().__init__(**kwargs)
+        self.lr_scheduler = lr_scheduler
+        self.num_warmup_steps = num_warmup_steps
+
     def evaluate(self, eval_dataset, ignore_keys=None, metric_key_prefix='eval'):
         import evaluate
         wer_metric = evaluate.load('wer')
@@ -201,6 +227,10 @@ class CustomTrainer(Trainer):
                 model_kwargs = {}
                 if 'spk_emb' in x:
                     model_kwargs['spk_emb'] = torch.tensor(x['spk_emb'], device=base_model.device, dtype=base_model.dtype).unsqueeze(0)
+                if 'num_channels' in x:
+                    model_kwargs['ch_lens'] = torch.tensor(x['num_channels'], device=base_model.device, dtype=torch.int32).unsqueeze(0)
+                    model_args = [model_args[0][0]]
+
                 outputs = base_model(*model_args, **model_kwargs)
                 outputs = outputs['last_hidden_state']
                 hyp = rnnt_decoder(outputs, torch.tensor([outputs.shape[1]], device=outputs.device), 1)

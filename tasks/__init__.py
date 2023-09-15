@@ -17,14 +17,14 @@ import soundfile as sf
 import gzip
 import random
 
-def global_setup(state):
+def global_setup(state, num_gpus=1):
     os.environ['HF_DATASETS_OFFLINE']='1'
     os.environ['HF_EVALUATE_OFFLINE']='1'
     os.environ['WANDB_DISABLED'] = 'True'
 
     from safe_gpu import safe_gpu
     
-    safe_gpu.claim_gpus()
+    safe_gpu.claim_gpus(num_gpus)
     logger.info(f'Allocated devices: {safe_gpu.gpu_owner.devices_taken}')
 
     state['allocated_devices'] = safe_gpu.gpu_owner.devices_taken
@@ -159,7 +159,7 @@ def fit_model(state, training_args, data_collator=None, metrics_fn=None, eval_sp
     #batch = {k: v.to('cuda') for k,v in batch.items()}
     #state['model'].to('cuda')
     #outs = state['model'](**batch)
-    #from IPython import embed; embed()
+    state['dataset']['train'][0]
     trainer.train()
 
 class DataCollatorCTCWithPadding:
@@ -180,10 +180,11 @@ class DataCollatorCTCWithPadding:
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         # split inputs and labels since they have to be of different lengths and need
         # different padding methods
-
-        input_features = [{"input_values": feature["input_values"]} for feature in features]
+        if np.array(features[0]['input_values']).ndim==2:
+            input_features=[{'input_values': xii} for xi in features for xii in xi['input_values']]
+        else:
+            input_features = [{"input_values": feature["input_values"]} for feature in features]
         label_features = [{"input_ids": feature["labels"]} for feature in features]
-
         batch = self.processor.pad(
             input_features,
             padding=self.padding,
@@ -205,7 +206,11 @@ class DataCollatorCTCWithPadding:
         batch["labels"] = labels
         if 'spk_emb' in features[0].keys():
             batch['spk_emb'] = torch.stack([torch.tensor(xi['spk_emb']) for xi in features])
-
+        if 'num_channels' in features[0].keys():
+            batch['num_channels'] = torch.tensor([xi['num_channels'] for xi in features])
+        print(batch['input_values'].shape)
+        if 'spk_emb' in features[0].keys() and 'num_channels' in features[0].keys():
+            batch['spk_emb'] = torch.repeat_interleave(batch['spk_emb'], batch['num_channels'],dim=0)
         return batch
 
 def compute_metrics(pred, processor=None):
@@ -232,12 +237,18 @@ def eval_model(state, beam_size=1, start=0, end=None, split=None):
     base_model = state['model'].wavlm.to('cuda')
     lm_head = state['model'].lm_head.to('cuda')
     blank_token = state['model'].config.vocab_size
+
+    #s = joblib.load('experiments/chime_asrs/gss-wavlm-large-rnnt-encnotfrozen/state.pkl')
+    #vocab = state['processor'].tokenizer.vocab
+    #idx_to_vocab = {v:k for k,v in vocab.items()}
+    #from IPython import embed; embed()
     with open(state['vocab_path'],'r') as f:
         vocab = json.load(f)
     idx_to_vocab = {v:k for k,v in vocab.items()}
     state['model'].eval()
     rnnt_decoder = RNNTBeamSearch(lm_head, blank_token)
     results = {}
+
     for k,v in state['dataset'].items():
         if (split is not None) and (k in split):
             if end is None:
@@ -275,6 +286,8 @@ def eval_model(state, beam_size=1, start=0, end=None, split=None):
                         nbests.append(nbest_i)
                         nbests_scores.append(nbest_scores_i)
                         ref = ''.join([idx_to_vocab[xi] for xi in x['labels']]).replace('|',' ')
+                        print(decoded)
+                        print(ref)
                         refs.append(ref)
                         ids.append(x['id'])
 
@@ -283,6 +296,8 @@ def eval_model(state, beam_size=1, start=0, end=None, split=None):
             result_i = {'wer': wer, 'preds': preds, 'refs': refs, 'nbest': nbests, 'nbest_scores': nbests_scores, 'ids': ids}
             joblib.dump(result_i, Path(state['output_dir'],'{}-{}-{}.pkl'.format(k, start, end)))
             results[k] = result_i
+            end=None
+    
     state['results'] = results
 
     joblib.dump(results, Path(state['output_dir'],'results.pkl'))
@@ -298,37 +313,53 @@ def load_gzjson(filename):
             results.append(json.loads(x))
     return results
 
-def load_chime7(state,dataset_path, chime_paths, postprocessing_fn, train_splits, eval_splits):
+def load_chime7(state,dataset_path, chime_paths, postprocessing_fn, train_splits, eval_splits, use_aug=True,gss=True):
+    
     if not Path('librimix_metadata.pkl').exists():
         #Load Augmented Data
-        supervision_list = Path(dataset_path).rglob('*.pkl')
-        all_supervisions = []
-        for s in tqdm(supervision_list, desc='Loading metadata'):
-            all_supervisions.extend(joblib.load(s))
-        all_supervisions = pd.DataFrame(all_supervisions)
-        all_supervisions = all_supervisions.rename(columns={'transcription':'text'})
-        all_supervisions['split'] = 'train'
+        if use_aug:
+            supervision_list = Path(dataset_path).rglob('*.pkl')
+            all_supervisions = []
+            for s in tqdm(supervision_list, desc='Loading metadata'):
+                all_supervisions.extend(joblib.load(s))
+            all_supervisions = pd.DataFrame(all_supervisions)
+            all_supervisions = all_supervisions.rename(columns={'transcription':'text'})
+            all_supervisions['split'] = 'train'
+        else:
+            all_supervisions = pd.DataFrame([]) 
         #Load Chime6 data
-        
         rows = []
         for split in (train_splits + eval_splits):
             split_dir=Path(chime_paths,*split.split('_'))
-            recordings_file=Path(split_dir,'{}_gss_recordings.jsonl.gz'.format(split))
-            supervisions_file=Path(split_dir,'{}_gss_supervisions.jsonl.gz'.format(split))
+            if gss:
+                gss='_gss'
+            else:
+                gss=''
+            recordings_file=Path(split_dir,'{}{}_recordings.jsonl.gz'.format(split,gss))
+            supervisions_file=Path(split_dir,'{}{}_supervisions.jsonl.gz'.format(split,gss))
             recordings_md=load_gzjson(recordings_file)
             recordings_md = {v['id']: v for v in recordings_md}
             supervisions_md=load_gzjson(supervisions_file)
+            if len(supervisions_md)==1:
+                supervisions_md=supervisions_md[0]
             for s in supervisions_md:
+                if ('channel' in s) or len(s['channel'])>1:
+                    filename = [Path('/mnt/matylda3/karafiat/GIT/CHiME-7/ASR/espnet.v0',recordings_md[s['recording_id']]['sources'][i]['source']) for i in s['channel']]
+                else:
+                    filename = Path('/mnt/matylda3/karafiat/GIT/CHiME-7/ASR/espnet.v0',recordings_md[s['recording_id']]['sources'][0]['source'])
+                    
                 example_i = {'text': s['text'],
                                 'speaker_id': s['speaker'],
-                                'filename': Path('/mnt/matylda3/karafiat/GIT/CHiME-7/ASR/espnet.v0',recordings_md[s['recording_id']]['sources'][0]['source']),
-                                'split': 'train' if split in train_splits else split}
+                                'filename': filename,
+                                'split': 'train' if split in train_splits else split,
+                                'original_split': split,
+                                'id': s['id']}
+
                 if 'start' in s:
                     sr = recordings_md[s['recording_id']]['sampling_rate']
                     example_i['start'] = int(s['start']*sr)
                     example_i['stop'] = int((s['start']+s['duration'])*sr)
                 rows.append(example_i)
-
         chime6_df = pd.DataFrame(rows)
         all_supervisions=pd.concat([all_supervisions,chime6_df])
 
@@ -336,7 +367,19 @@ def load_chime7(state,dataset_path, chime_paths, postprocessing_fn, train_splits
             state, all_supervisions = fn(state, all_supervisions)
         #Load Chime Mixer DipCO
         tqdm.pandas()
-        all_supervisions['duration'] = all_supervisions['filename'].progress_apply(lambda x: sf.info(x).frames if Path(x).exists() else -1)
+        def get_duration(x):
+            if x['start'] > 0:
+                return x['stop'] - x['start']
+            else:
+                f = x['filename']
+                if isinstance(f,list):
+                    f = f[0]
+                if Path(f).exists():
+                    return sf.info(f).frames
+                else:
+                    return -1
+
+        all_supervisions['duration'] = all_supervisions.progress_apply(get_duration,axis=1)
     else:
         all_supervisions = joblib.load('librimix_metadata.pkl')
     all_supervisions = all_supervisions.loc[all_supervisions['duration']<160000]
@@ -353,25 +396,29 @@ def get_dataloaders(state, dataset_cls, tokenizer_fn, feature_extractor_fn, proc
     dataset_meta = state['dataset_metadata']
     dataset = dataset_cls(dataset=state['dataset_metadata'],processor=processor)
     state['dataset'] = {s: dataset_cls(dataset=dataset_meta.loc[dataset_meta['split']==s], processor=processor) for s in dataset_meta['split'].unique()}
+    
     return state
 
 class Chime7Dataset(torch.utils.data.Dataset):
-    def __init__(self, dataset, processor, xvectors=None):
+    def __init__(self, dataset, processor, xvectors=None, splits=None):
         super().__init__()
         self.dataset = dataset
         self.processor = processor
         self.xvectors = xvectors
         if self.xvectors is not None:
-            xv_files=list(Path(self.xvectors).rglob('*'))
-            xv = {}
-            for f in xv_files:
-                d = joblib.load(f)
-                if not isinstance(d[next(iter(d.keys()))],dict):
-                    xv.update(d)
-                else:
-                    for _,v in d.items():
-                        xv.update(v)
-            self.xvectors=xv
+            if Path(self.xvectors).is_dir():
+                xv_files=list(Path(self.xvectors).rglob('*'))
+                xv = {}
+                for f in xv_files:
+                    d = joblib.load(f)
+                    if not isinstance(d[next(iter(d.keys()))],dict):
+                        xv.update(d)
+                    else:
+                        for _,v in d.items():
+                            xv.update(v)
+                self.xvectors=xv
+            else:
+                self.xvectors = joblib.load(self.xvectors)
 
     def __getitem__(self, idx):
         si = self.dataset.iloc[idx]
@@ -384,22 +431,56 @@ class Chime7Dataset(torch.utils.data.Dataset):
         else:
             stop=None
         try:
-            x, fs = sf.read(si['filename'],start=start,stop=stop)
-        except:
-            print('Failed')
+            if isinstance(si['filename'],list):
+                x = []
+                for sii in si['filename']:
+                    try:
+                        xi, fs = sf.read(sii,start=start,stop=stop)
+                    except:
+                        xi, fs = sf.read(sii)
+                        xi = xi[start:stop]
+                    x.append(xi)
+                x = np.stack(x)
+            else:
+                x, fs = sf.read(si['filename'],start=start,stop=stop)
+        except Exception as e:
+            from IPython import embed; embed()
+            
         batch = {}
         if self.processor is not None:
-            batch['input_values'] = self.processor(x, sampling_rate=fs).input_values[0]
-            batch["input_length"] = len(batch["input_values"])
+            try:
+                x = np.array(x)
+            except:
+                min_len = min([len(xi) for xi in x])
+                x = [xi[:min_len] for xi in x]
+                x = np.array(x)
+            if x.ndim == 1:
+                x = [x]
+            vs=[]
+            for xi in x:
+                vi = self.processor(xi, sampling_rate=fs).input_values[0]
+                vs.append(vi)
+            if len(vs) == 1:
+                batch['input_values'] = vs[0]
+                batch['input_length'] = len(batch['input_values'])
+            else:
+                batch['input_values'] = np.stack(vs)
+                batch["input_length"] = len(batch["input_values"][0])
 
             with self.processor.as_target_processor():
                 batch["labels"] = self.processor(si["text"]).input_ids
         if self.xvectors is not None:
-            xv = self.xvectors[si['speaker_id']]
+            if isinstance(self.xvectors[next(iter(self.xvectors.keys()))],dict):
+                xv = self.xvectors[si['original_split'].replace('_','-')][si['speaker_id']]
+            else:
+                xv = self.xvectors[si['speaker_id']]
             if isinstance(xv,list):
                 idx = random.randint(0,len(xv)-1)
                 xv = xv[idx]
             batch['spk_emb'] = xv
+            batch['num_channels'] = x.shape[0]
+            batch['id'] = si['id']
+            
         return batch
 
     def __len__(self):

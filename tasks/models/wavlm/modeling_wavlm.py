@@ -605,7 +605,7 @@ class WavLMEncoderLayer(nn.Module):
         self.feed_forward = WavLMFeedForward(config)
         self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
-    def forward(self, hidden_states, attention_mask=None, position_bias=None, output_attentions=False, index=0):
+    def forward(self, hidden_states, attention_mask=None, position_bias=None, output_attentions=False, index=0, num_channels=None):
         attn_residual = hidden_states
         hidden_states, attn_weights, position_bias = self.attention(
             hidden_states,
@@ -675,7 +675,7 @@ class WavLMEncoder(nn.Module):
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout)
         self.layers = nn.ModuleList(
-            [WavLMEncoderLayer(config, has_relative_position_bias=(i == 0)) for i in range(config.num_hidden_layers)]
+            [MultichannelWavLMEncoderLayer(config, has_relative_position_bias=(i == 0), pool_channels=(i==config.pool_layer)) if i in config.xch_layers else WavLMEncoderLayer(config, has_relative_position_bias=(i == 0)) for i in range(config.num_hidden_layers)]
         )
         self.gradient_checkpointing = False
 
@@ -685,7 +685,8 @@ class WavLMEncoder(nn.Module):
         attention_mask=None,
         output_attentions=False,
         output_hidden_states=False,
-        return_dict=True
+        return_dict=True,
+        num_channels=None
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -716,7 +717,7 @@ class WavLMEncoder(nn.Module):
                     # create gradient checkpointing function
                     def create_custom_forward(module):
                         def custom_forward(*inputs):
-                            return module(*inputs, output_attentions)
+                            return module(*inputs, output_attentions, num_channels=num_channels)
 
                         return custom_forward
 
@@ -725,6 +726,7 @@ class WavLMEncoder(nn.Module):
                         hidden_states,
                         attention_mask,
                         position_bias,
+                        num_channels
                     )
                 else:
                     layer_outputs = layer(
@@ -733,6 +735,7 @@ class WavLMEncoder(nn.Module):
                         position_bias=position_bias,
                         output_attentions=output_attentions,
                         index=i,
+                        num_channels=num_channels
                     )
 
                 hidden_states, position_bias = layer_outputs[:2]
@@ -763,11 +766,12 @@ class WavLMEncoderStableLayerNorm(nn.Module):
         self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout)
         self.layers = nn.ModuleList(
-            [
-                WavLMEncoderLayerStableLayerNorm(config, has_relative_position_bias=(i == 0))
+            [MultichannelWavLMEncoderLayerStableLayerNorm(config, has_relative_position_bias=(i==0), pool_channels=(i==config.pool_layer)) if i in config.xch_layers else WavLMEncoderLayerStableLayerNorm(config, has_relative_position_bias=(i == 0))
                 for i in range(config.num_hidden_layers)
             ]
         )
+        print(config.xch_layers)
+        print(config.pool_layer)
         self.gradient_checkpointing = False
 
     def forward(
@@ -777,6 +781,7 @@ class WavLMEncoderStableLayerNorm(nn.Module):
         output_attentions=False,
         output_hidden_states=False,
         return_dict=True,
+        num_channels=None
     ):
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -807,7 +812,7 @@ class WavLMEncoderStableLayerNorm(nn.Module):
                     # create gradient checkpointing function
                     def create_custom_forward(module):
                         def custom_forward(*inputs):
-                            return module(*inputs, output_attentions)
+                            return module(*inputs, output_attentions, num_channels=num_channels)
 
                         return custom_forward
 
@@ -816,14 +821,23 @@ class WavLMEncoderStableLayerNorm(nn.Module):
                         hidden_states,
                         attention_mask,
                         position_bias,
+                        num_channels
                     )
                 else:
-                    layer_outputs = layer(
-                        hidden_states,
-                        attention_mask=attention_mask,
-                        output_attentions=output_attentions,
-                        position_bias=position_bias,
-                    )
+                    if 'Multichannel' in layer.__class__.__name__:
+                        layer_outputs = layer(
+                            hidden_states,
+                            attention_mask=attention_mask,
+                            output_attentions=output_attentions,
+                            position_bias=position_bias,
+                            num_channels=num_channels
+                        )
+                    else:
+                        layer_outputs = layer(
+                            hidden_states,
+                            attention_mask=attention_mask,
+                            output_attentions=output_attentions,
+                            position_bias=position_bias)
                 hidden_states, position_bias = layer_outputs[:2]
 
             if skip_the_layer:
@@ -2011,6 +2025,347 @@ class WavLMModelConditionedByXVector(WavLMPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+
+        hidden_states = encoder_outputs[0]
+
+        if self.adapter is not None:
+            hidden_states = self.adapter(hidden_states)
+
+        if not return_dict:
+            return (hidden_states, extract_features) + encoder_outputs[1:]
+
+        return Wav2Vec2BaseModelOutput(
+            last_hidden_state=hidden_states,
+            extract_features=extract_features,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
+
+class MultichannelWavLMEncoderLayer(nn.Module):
+    def __init__(self, config: WavLMConfig, has_relative_position_bias: bool = True, pool_channels=False):
+        super().__init__()
+        self.attention = WavLMAttention(
+            embed_dim=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            dropout=config.attention_dropout,
+            num_buckets=config.num_buckets,
+            max_distance=config.max_bucket_distance,
+            has_relative_position_bias=has_relative_position_bias,
+        )
+        # self.xchannelattention = WavLMAttention(
+        #     embed_dim=config.hidden_size,
+        #     num_heads=config.num_attention_heads,
+        #     dropout=config.attention_dropout,
+        #     num_buckets=config.num_buckets,
+        #     max_distance=config.max_bucket_distance,
+        #     has_relative_position_bias=False,
+        # )
+        self.xchannelattention = torch.nn.MultiheadAttention(
+            config.hidden_size,
+            config.num_attention_heads,
+            config.attention_dropout,
+            batch_first=True
+        )
+        self.dropout = nn.Dropout(config.hidden_dropout)
+        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.feed_forward = WavLMFeedForward(config)
+        self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.pool_channels=pool_channels
+        self.xchannel_weight = nn.Parameter(torch.tensor(0.))
+
+    def create_crosschannel_attention_mask(self, num_channels):
+        batch_size=torch.sum(num_channels)
+        idxs = torch.arange(0,batch_size).unsqueeze(0)
+        n_slice_indexs=torch.cat([torch.tensor([0]), torch.cumsum(num_channels,0)])
+
+        att_mask = torch.logical_and(idxs>=(n_slice_indexs[:-1].unsqueeze(1)),idxs<(n_slice_indexs[1:].unsqueeze(1)))
+        att_mask = torch.repeat_interleave(att_mask,num_channels,dim=0)
+
+        return att_mask
+
+    def create_pooling_matrix(self, num_channels):
+        batch_size=torch.sum(num_channels)
+        idxs = torch.arange(0,batch_size).unsqueeze(0)
+        n_slice_indexs=torch.cat([torch.tensor([0]), torch.cumsum(num_channels,0)])
+
+        pooling_matrix = torch.logical_and(idxs>=(n_slice_indexs[:-1].unsqueeze(1)),idxs<(n_slice_indexs[1:].unsqueeze(1)))
+        pooling_matrix = pooling_matrix * (1.0/num_channels).unsqueeze(1)
+
+        return pooling_matrix
+
+    def forward(self, hidden_states, attention_mask=None, position_bias=None, output_attentions=False, index=0, num_channels=None):
+        attn_residual = hidden_states
+        hidden_states, attn_weights, position_bias = self.attention(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_bias=position_bias,
+            output_attentions=output_attentions,
+            index=index,
+        )
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = attn_residual + hidden_states
+
+        hidden_states = self.layer_norm(hidden_states)
+
+        hidden_states = hidden_states + self.feed_forward(hidden_states)
+        hidden_states = self.final_layer_norm(hidden_states)
+
+        if num_channels is not None:
+            xch_in = torch.transpose(hidden_states,0,1)
+            xch_att_mask = self.create_crosschannel_attention_mask(num_channels)
+
+            xch_hidden_states = self.xchannelattention(
+                                                    xch_in,
+                                                    xch_in,
+                                                    xch_in,
+                                                    attn_mask=xch_att_mask
+                                                )
+            xch_hidden_states = torch.transpose(xch_hidden_states[0],0,1)
+            hidden_states = (1-self.xchannel_weight)*hidden_states + self.xchannel_weight*xch_hidden_states
+            #hidden_states = torch.transpose(hidden_states[0],0,1)
+        
+        if self.pool_channels:
+            pool_matrix = self.create_pooling_matrix(num_channels)
+            hidden_states = (pool_matrix[:,:,None,None]*hidden_states[None,:,:,:]).sum(axis=1)
+            position_bias = position_bias[:hidden_states.shape[0]*self.attention.num_heads]
+        outputs = (hidden_states, position_bias)
+        if output_attentions:
+            outputs += (attn_weights,)
+
+    
+        return outputs
+
+class MultichannelWavLMEncoderLayerStableLayerNorm(nn.Module):
+    def __init__(self, config: WavLMConfig, has_relative_position_bias: bool = True, pool_channels=False):
+        super().__init__()
+        self.attention = WavLMAttention(
+            embed_dim=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            dropout=config.attention_dropout,
+            num_buckets=config.num_buckets,
+            max_distance=config.max_bucket_distance,
+            has_relative_position_bias=has_relative_position_bias,
+        )
+        
+        self.xchannelattention = torch.nn.MultiheadAttention(
+            config.hidden_size,
+            config.num_attention_heads,
+            config.attention_dropout,
+            batch_first=True
+        )
+        self.dropout = nn.Dropout(config.hidden_dropout)
+        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.feed_forward = WavLMFeedForward(config)
+        self.final_layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.pool_channels=pool_channels
+        self.xchannel_weight = nn.Parameter(torch.tensor(0.))
+        
+    def create_crosschannel_attention_mask(self, num_channels):
+        batch_size=torch.sum(num_channels)
+        idxs = torch.arange(0,batch_size,device=num_channels.device).unsqueeze(0)
+        n_slice_indexs=torch.cat([torch.tensor([0],device=num_channels.device), torch.cumsum(num_channels,0)])
+
+        att_mask = torch.logical_and(idxs>=(n_slice_indexs[:-1].unsqueeze(1)),idxs<(n_slice_indexs[1:].unsqueeze(1)))
+        att_mask = torch.repeat_interleave(att_mask,num_channels,dim=0)
+
+        return att_mask
+
+    def create_pooling_matrix(self, num_channels):
+        batch_size=torch.sum(num_channels)
+        idxs = torch.arange(0,batch_size,device=num_channels.device).unsqueeze(0)
+        n_slice_indexs=torch.cat([torch.tensor([0],device=num_channels.device), torch.cumsum(num_channels,0)])
+
+        pooling_matrix = torch.logical_and(idxs>=(n_slice_indexs[:-1].unsqueeze(1)),idxs<(n_slice_indexs[1:].unsqueeze(1)))
+        pooling_matrix = pooling_matrix * (1.0/num_channels).unsqueeze(1)
+
+        return pooling_matrix
+        
+    def forward(self, hidden_states, attention_mask=None, position_bias=None, output_attentions=False, num_channels=None):
+        attn_residual = hidden_states
+        hidden_states = self.layer_norm(hidden_states)
+        hidden_states, attn_weights, position_bias = self.attention(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_bias=position_bias,
+            output_attentions=output_attentions,
+        )
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = attn_residual + hidden_states
+        hidden_states = hidden_states + self.feed_forward(self.final_layer_norm(hidden_states))
+
+        if num_channels is not None:
+            xch_in = torch.transpose(hidden_states,0,1)
+            xch_att_mask = self.create_crosschannel_attention_mask(num_channels)
+
+            xch_hidden_states = self.xchannelattention(
+                                                    xch_in,
+                                                    xch_in,
+                                                    xch_in,
+                                                    attn_mask=xch_att_mask
+                                                )
+            xch_hidden_states = torch.transpose(xch_hidden_states[0],0,1)
+            hidden_states = (1-self.xchannel_weight)*hidden_states + self.xchannel_weight*xch_hidden_states
+            #hidden_states = torch.transpose(hidden_states[0],0,1)
+        
+        if self.pool_channels:
+            pool_matrix = self.create_pooling_matrix(num_channels)
+            hidden_states = (pool_matrix[:,:,None,None]*hidden_states[None,:,:,:]).sum(axis=1)
+            position_bias = position_bias[:hidden_states.shape[0]*self.attention.num_heads]
+        outputs = (hidden_states, position_bias)
+
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        return outputs
+class MultichannelWavLMModelConditionedByXVector(WavLMPreTrainedModel):
+    def __init__(self, config: WavLMConfig):
+        super().__init__(config)
+        self.config = config
+        self.feature_extractor = WavLMFeatureEncoder(config)
+        self.feature_projection = WavLMFeatureProjection(config)
+        if self.config.speaker_embedding_mode == 'concat_linear':
+            self.speaker_embedding_projection = nn.Linear(config.speaker_embedding_dim + config.hidden_size, config.hidden_size)
+        elif self.config.speaker_embedding_mode == 'sum':
+            self.speaker_embedding_projection = nn.Linear(config.speaker_embedding_dim, config.hidden_size)
+            self.spk_emb_weight = nn.Parameter(torch.tensor(0.))
+        else:
+            raise Exception("Unrecognized speaker_embedding_mode")
+        # model only needs masking vector if mask prob is > 0.0
+        if config.mask_time_prob > 0.0 or config.mask_feature_prob > 0.0:
+            self.masked_spec_embed = nn.Parameter(torch.FloatTensor(config.hidden_size).uniform_())
+
+        if config.do_stable_layer_norm:
+            self.encoder = WavLMEncoderStableLayerNorm(config)
+        else:
+            self.encoder = WavLMEncoder(config)
+
+        self.adapter = WavLMAdapter(config) if config.add_adapter else None
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def freeze_feature_extractor(self):
+        """
+        Calling this function will disable the gradient computation for the feature encoder so that its parameters will
+        not be updated during training.
+        """
+        warnings.warn(
+            "The method `freeze_feature_extractor` is deprecated and will be removed in Transformers v5."
+            "Please use the equivalent `freeze_feature_encoder` method instead.",
+            FutureWarning,
+        )
+        self.freeze_feature_encoder()
+
+    def freeze_feature_encoder(self):
+        """
+        Calling this function will disable the gradient computation for the feature encoder so that its parameter will
+        not be updated during training.
+        """
+        self.feature_extractor._freeze_parameters()
+
+    def _mask_hidden_states(
+        self,
+        hidden_states: torch.FloatTensor,
+        mask_time_indices: Optional[torch.FloatTensor] = None,
+        attention_mask: Optional[torch.LongTensor] = None,
+    ):
+        """
+        Masks extracted features along time axis and/or along feature axis according to
+        [SpecAugment](https://arxiv.org/abs/1904.08779).
+        """
+
+        # `config.apply_spec_augment` can set masking to False
+        if not getattr(self.config, "apply_spec_augment", True):
+            return hidden_states
+
+        # generate indices & apply SpecAugment along time axis
+        batch_size, sequence_length, hidden_size = hidden_states.size()
+
+        if mask_time_indices is not None:
+            # apply SpecAugment along time axis with given mask_time_indices
+            hidden_states[mask_time_indices] = self.masked_spec_embed.to(hidden_states.dtype)
+        elif self.config.mask_time_prob > 0 and self.training:
+            mask_time_indices = _compute_mask_indices(
+                (batch_size, sequence_length),
+                mask_prob=self.config.mask_time_prob,
+                mask_length=self.config.mask_time_length,
+                attention_mask=attention_mask,
+                min_masks=self.config.mask_time_min_masks,
+            )
+            mask_time_indices = torch.tensor(mask_time_indices, device=hidden_states.device, dtype=torch.bool)
+            hidden_states[mask_time_indices] = self.masked_spec_embed.to(hidden_states.dtype)
+
+        if self.config.mask_feature_prob > 0 and self.training:
+            # generate indices & apply SpecAugment along feature axis
+            mask_feature_indices = _compute_mask_indices(
+                (batch_size, hidden_size),
+                mask_prob=self.config.mask_feature_prob,
+                mask_length=self.config.mask_feature_length,
+                min_masks=self.config.mask_feature_min_masks,
+            )
+            mask_feature_indices = torch.tensor(mask_feature_indices, device=hidden_states.device, dtype=torch.bool)
+            mask_feature_indices = mask_feature_indices[:, None].expand(-1, sequence_length, -1)
+            hidden_states[mask_feature_indices] = 0
+
+        return hidden_states
+
+    @add_start_docstrings_to_model_forward(WAVLM_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=Wav2Vec2BaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+        modality="audio",
+        expected_output=_EXPECTED_OUTPUT_SHAPE,
+    )
+
+    def forward(
+        self,
+        input_values: Optional[torch.Tensor],
+        spk_emb: Optional[torch.Tensor],
+        ch_lens: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        mask_time_indices: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ) -> Union[Tuple, Wav2Vec2BaseModelOutput]:
+        
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        extract_features = self.feature_extractor(input_values)
+        extract_features = extract_features.transpose(1, 2)
+
+        if attention_mask is not None:
+            # compute reduced attention_mask corresponding to feature vectors
+            attention_mask = self._get_feature_vector_attention_mask(
+                extract_features.shape[1], attention_mask, add_adapter=False
+            )
+
+        hidden_states, extract_features = self.feature_projection(extract_features)
+        hidden_states = self._mask_hidden_states(
+            hidden_states, mask_time_indices=mask_time_indices, attention_mask=attention_mask
+        )
+
+        if spk_emb is not None:
+            if self.config.speaker_embedding_mode == 'concat_linear':
+                #Concatenate XV and CNN Encoder representations
+                hidden_states = torch.cat([hidden_states,spk_emb.unsqueeze(1).repeat(1,hidden_states.shape[1],1)],axis=-1)
+                hidden_states = self.speaker_embedding_projection(hidden_states)
+            elif self.config.speaker_embedding_mode == 'sum':
+                spk_emb_proj = self.spk_emb_weight*self.speaker_embedding_projection(spk_emb)
+                hidden_states = hidden_states + spk_emb_proj.unsqueeze(1)
+            encoder_outputs = self.encoder(
+                hidden_states,
+                attention_mask=attention_mask,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                num_channels=ch_lens
+            )
 
         hidden_states = encoder_outputs[0]
 

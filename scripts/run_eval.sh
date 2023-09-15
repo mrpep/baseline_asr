@@ -15,5 +15,5 @@ ginpipe configs/base/eval_asr.gin \
         configs/models/training_config.gin \
         --module_list configs/imports \
         --project_name chime_asrs \
-        --experiment_name gss-wavlm-large-rnnt-deveval-29500-beam20 \
-        --mods "MODEL_PATH='/mnt/matylda5/qpepino/baseline-asr/experiments/chime_asrs/gss-wavlm-large-rnnt/ckpt29500'" "tasks.eval_model.beam_size=20" "tasks.eval_model.start=$1" "tasks.eval_model.end=$2"
+        --experiment_name gss-wavlm-large-rnnt-encnotfrozen-deveval-130000-beam20 \
+        --mods "MODEL_PATH='/mnt/matylda5/qpepino/baseline-asr/experiments/chime_asrs/gss-wavlm-large-rnnt-encnotfrozen/checkpoint-130000'" "tasks.eval_model.beam_size=20" "tasks.eval_model.start=$1" "tasks.eval_model.end=$2"

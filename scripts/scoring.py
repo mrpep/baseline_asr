@@ -3,8 +3,8 @@ import tqdm
 import os 
 from pathlib import Path
 
-data_path='/mnt/matylda5/qpepino/baseline-asr/chime_submit/mixer6_deveval.pkl'
-output_path='/mnt/matylda5/qpepino/baseline-asr/chime_submit/mixer6/deveval'
+data_path='/mnt/matylda5/qpepino/baseline-asr/chime_submit_lowlrfinetunecnn/dipco_deveval.pkl'
+output_path='/mnt/matylda5/qpepino/baseline-asr/chime_submit_lowlrfinetunecnn/dipco/deveval'
 
 data=joblib.load(data_path)
 n_best=20

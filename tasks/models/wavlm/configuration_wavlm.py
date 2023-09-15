@@ -249,6 +249,11 @@ class WavLMConfig(PretrainedConfig):
         adapter_stride=2,
         num_adapter_layers=3,
         output_hidden_size=None,
+        pool_layer=None,
+        xch_layers=[],
+        speaker_embedding_mode='sum',
+        speaker_embedding_dim=256,
+        num_conformer_layers=1,
         **kwargs,
     ):
         super().__init__(**kwargs, pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
@@ -330,6 +335,15 @@ class WavLMConfig(PretrainedConfig):
         self.tdnn_kernel = list(tdnn_kernel)
         self.tdnn_dilation = list(tdnn_dilation)
         self.xvector_output_dim = xvector_output_dim
+        self.speaker_embedding_mode = speaker_embedding_mode
+        self.speaker_embedding_dim = speaker_embedding_dim
+
+        #Multichannel-specific parameters.
+        self.xch_layers = xch_layers
+        self.pool_layer = pool_layer
+
+        #Conformer transducer
+        self.num_conformer_layers = num_conformer_layers
 
     @property
     def inputs_to_logits_ratio(self):

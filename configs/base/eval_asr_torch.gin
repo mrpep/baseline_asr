@@ -1,0 +1,6 @@
+execute_pipeline:
+    tasks = [@tasks.global_setup,
+             @tasks.load_chime7,
+             @tasks.get_dataloaders,
+             @tasks.load_hf_model,
+             @tasks.eval_model]

@@ -1,0 +1,15 @@
+tasks.load_chime7:
+    dataset_path=None
+    use_aug=False
+    chime_paths='/mnt/matylda5/qpepino/baseline-asr/channel_selection_supervisions'
+    postprocessing_fn=[@tasks.preprocess_transcriptions, @tasks.create_char_vocab]
+    train_splits=['chime6_train', 'mixer6_train']
+    eval_splits=['chime6_dev', 'mixer6_dev', 'dipco_dev']
+    gss=False
+tasks.create_char_vocab.vocab_path='vocabs/char_librispeechaug.json'
+tasks.preprocess_transcriptions.remove_columns=[]
+tasks.fit_model.eval_splits=['chime6_dev', 'mixer6_dev','dipco_dev']
+tasks.get_dataloaders.dataset_cls=@tasks.Chime7Dataset
+tasks.Chime7Dataset:
+    xvectors='/mnt/matylda5/qbarchi/xvector_selection/gss_xvectors_no_overlap/gss_no_overlap_spk_xvec_all_plus_eval'
+WavLMRNNT.speaker_embedding_dim=256

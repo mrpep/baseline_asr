@@ -9,3 +9,4 @@ transformers.TrainingArguments: TrainingArguments
 tasks.models.WavLMRNNT: WavLMRNNT
 tasks.models.CustomTrainer: CustomTrainer
 tasks.models.wavlm.WavLMModelConditionedByXVector: WavLMModelConditionedByXVector
+tasks.models.wavlm.MultichannelWavLMModelConditionedByXVector: MultichannelWavLMModelConditionedByXVector

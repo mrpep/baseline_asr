@@ -32,7 +32,8 @@ else:
         "WavLMForXVector",
         "WavLMModel",
         "WavLMPreTrainedModel",
-        "WavLMModelConditionedByXVector"
+        "WavLMModelConditionedByXVector",
+        "MultichannelWavLMModelConditionedByXVector"
     ]
 
 if TYPE_CHECKING:
@@ -52,7 +53,8 @@ if TYPE_CHECKING:
             WavLMForXVector,
             WavLMModel,
             WavLMPreTrainedModel,
-            WavLMModelConditionedByXVector
+            WavLMModelConditionedByXVector,
+            MultichannelWavLMModelConditionedByXVector
         )
 
 else:

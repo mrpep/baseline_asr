@@ -5,3 +5,4 @@ execute_pipeline:
              @tasks.process_hf_dataset,
              @tasks.load_hf_model,
              @tasks.eval_model]
+    cache = False
